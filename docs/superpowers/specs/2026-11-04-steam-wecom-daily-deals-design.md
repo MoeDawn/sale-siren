@@ -6,12 +6,12 @@
 
 ## 1. 目标
 
-利用 GitHub Actions 每天北京时间早晨自动拉取 Steam 首页精选特惠，将**从未推送过的新折扣**（以游戏 ID + 价格组合判定）以**图文卡片**形式推送到企业微信群机器人，并把推送记录以 Git 提交的方式持久化回仓库，避免重复推送。
+利用 GitHub Actions 每天北京时间早晨自动拉取 Steam 首页精选特惠，将**当日值得推送的折扣**（游戏首次出现、价格创新低、或与上次已推价格持平）以**图文卡片**形式推送到企业微信群机器人，并把推送记录以 Git 提交的方式持久化回仓库，用于过滤折扣变浅（价格升高）的游戏。
 
 ### 成功标准
 
 - 每天北京时间 9:00 左右自动运行，无需任何人工干预
-- 同一游戏同一价格终生只推一次；价格创新低时再次推送
+- 游戏价格创新低或与上次已推价格持平时再次推送；仅当本次价格高于上次已推价格（折扣变浅）时跳过
 - 消息带游戏封面图，点击卡片跳转 Steam 商店页
 - 完全免费（公共仓库 Actions + Steam 官方 API + 企业微信机器人）
 - 推送与状态写入满足事务性：绝不漏推，最坏情况重复推
@@ -83,10 +83,11 @@ repo/
 }
 ```
 
-- key = appid（字符串）；value 记录**已推送时的最终价（分）**
-- 判定为"新折扣"：appid 不在记录中，**或** 记录中的 price > 本次 final_price（价格创新低）
-- 记录 price ≤ 本次 final_price → 跳过
+- key = appid（字符串）；value 记录**上次推送时的最终价（分）**
+- 判定为"值得推送"：appid 不在记录中，**或** 记录中的 price ≥ 本次 final_price（价格创新低，或与上次持平）
+- 记录 price < 本次 final_price → 跳过（价格高于上次已推价，折扣变浅，不值得打扰）
 - 记录只增不减；同游戏再次命中时更新 price/discount/when 字段
+- 推送语义：同一游戏只要持续以 ≤ 上次已推价的价格出现在精选列表中，**每天都会再次推送**（用户明确要求的每日提醒行为）
 
 ## 6. 企业微信推送（news 图文）
 
@@ -106,7 +107,7 @@ repo/
 - 排序：折扣力度降序，同折扣按现价升序（最吸引眼球的在前；news 第一篇显示大图）
 - 每条 news 消息最多 8 篇图文，超出自动拆成多条依次发送
 - 企业微信机器人限频 20 条/分钟，分批发送间加 1s 间隔即可
-- **无新折扣时不发任何消息**，仅在 Actions 日志中记录
+- **当日无可推折扣时（无符合规则的条目）不发任何消息**，仅在 Actions 日志中记录
 - Webhook 地址从环境变量 `WECOM_WEBHOOK` 读取（GitHub Secrets 注入），绝不写进代码
 - 推送判定：HTTP 200 且响应 `errcode == 0` 才算成功
 
@@ -161,12 +162,12 @@ jobs:
 | `pushed_games.json` 损坏/非法 JSON | 视为空记录，打 warning，下次成功推送后重建文件 |
 | `WECOM_WEBHOOK` 未配置 | 启动即 exit 1，错误信息明确指向 Secrets 配置 |
 | git push 冲突 | pull --rebase 后重试 1 次；仍失败 exit 1 |
-| 无新折扣 | 正常退出 exit 0，不发消息，仍更新 last_updated 并 commit（保活） |
+| 无可推折扣 | 正常退出 exit 0，不发消息，仍更新 last_updated 并 commit（保活） |
 
 ## 9. 测试策略
 
 - **本地快速验证**：`workflow_dispatch` 手动触发 + 临时指向测试群 webhook，验证 API 拉取、去重、图文渲染、状态写回全链路
-- **去重逻辑单测**：纯函数 `diff(pushed, current) -> new_deals` 的单元测试（不触网），覆盖：首次运行、已见同价、价格创新低、价格回升不推、记录文件缺失、记录文件损坏六个场景。测试文件 `test_main.py`，同样仅标准库（`unittest`）
+- **去重逻辑单测**：纯函数 `diff(pushed, current) -> new_deals` 的单元测试（不触网），覆盖：首次运行（推）、已见同价（推）、价格创新低（推）、价格回升（不推）、记录文件缺失、记录文件损坏六个场景。测试文件 `test_main.py`，同样仅标准库（`unittest`）
 - **消息组装测试**：验证 8 篇/条 的分批边界、排序、字段完整性
 
 ## 10. 已知限制与风险
@@ -177,4 +178,57 @@ jobs:
 | cron 延迟 | GitHub scheduled workflow 不保证准点 | 可接受；可调 cron 表达式 |
 | Steam API 无官方 SLA | 接口偶尔 429/超时 | UA + 重试；失败自然留给下轮 |
 | news 图文 description 不支持 markdown | 价格只能纯文本 | 已与用户确认的取舍（换图片） |
+| 每日重复推送 | 价格未变的游戏每天都会再推一次，大促期间同一批游戏连续多日重复出现 | 属用户明确要求的每日提醒行为；如嫌吵可改回"仅创新低才推"的判定 |
+
+## 11. 配置指南（交付时同步写入 README.md）
+
+首次部署与日常运维的全部手工步骤。
+
+### 11.1 创建企业微信机器人（获取 Webhook）
+
+1. PC 端企业微信打开目标群聊
+2. 右上角群设置（…）→ 群机器人 → 添加机器人 → 新创建一个
+3. 复制 Webhook 地址，形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx`
+4. ⚠️ 该地址即密钥，泄露后任何人都能向群发消息；不要写进代码、不要发到聊天里
+
+### 11.2 推送代码到 GitHub
+
+```bash
+git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+git push -u origin main
+```
+
+- 公共仓库：Actions 完全免费（推荐）
+- 私有仓库：每月 2000 分钟免费额度，本项目每天约用 1 分钟，也够用
+
+### 11.3 配置 Secret
+
+仓库页面 → Settings → Secrets and variables → Actions → New repository secret：
+
+- Name：`WECOM_WEBHOOK`
+- Secret：粘贴 11.1 复制的完整 Webhook 地址
+
+### 11.4 启用并验证 Actions
+
+1. 仓库 Actions 标签页确认 "Daily Steam Deals Push" workflow 已出现；scheduled workflows 在首次 push 后自动启用，若显示 disabled 则手动点 Enable
+2. 手动测试：Actions → Daily Steam Deals Push → Run workflow，验证两点：
+   - 群里收到图文消息（游戏封面 + 价格 + 点卡片跳商店页）
+   - `data/pushed_games.json` 产生一条新 commit
+3. 再手动运行一次：同批游戏价格未变仍会再次推送（符合"与上次持平也推"的语义），验证每日重复推送链路正常
+
+### 11.5 调整推送时间
+
+编辑 `.github/workflows/daily-push.yml` 的 cron 表达式。**注意 cron 用 UTC 时间，北京时间 = UTC + 8**：
+
+| 目标（北京时间） | cron |
+|------|------|
+| 每天 9:00（默认） | `0 1 * * *` |
+| 每天 8:30（Actions 低峰，更准点） | `30 0 * * *` |
+| 每天早晚各一次（9:00 与 21:00） | `0 1,13 * * *` |
+
+### 11.6 日常运维
+
+- 想让所有游戏重新推一遍（清空历史）：清空 `data/pushed_games.json` 中 `pushed` 的内容并提交
+- 收到 GitHub "scheduled workflow disabled" 邮件（保活策略下理论上不会发生）：到 Actions 页重新 Enable
+- 换群或换机器人：新机器人拿到新 webhook 地址后，更新 `WECOM_WEBHOOK` Secret 即可
 | 每条消息 8 篇上限、20 条/分钟限频 | 极端大促时消息多 | 分批 + 1s 间隔；精选特惠日常远达不到限频 |
