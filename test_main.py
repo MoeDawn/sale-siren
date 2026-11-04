@@ -71,3 +71,10 @@ class TestLoadPushed(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 f.write("{not json")
             self.assertEqual(main.load_pushed(path), {})
+
+    def test_non_dict_top_level_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("null")
+            self.assertEqual(main.load_pushed(path), {})

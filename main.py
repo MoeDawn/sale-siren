@@ -30,6 +30,8 @@ def load_pushed(path=STATE_PATH):
     try:
         with open(path, encoding="utf-8") as f:
             state = json.load(f)
+        if not isinstance(state, dict):
+            raise ValueError("state is not a dict")
         pushed = state.get("pushed")
         if not isinstance(pushed, dict):
             raise ValueError("pushed is not a dict")
