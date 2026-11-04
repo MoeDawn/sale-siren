@@ -165,3 +165,40 @@ def send_news(webhook, deals):
         if idx < len(batches):
             time.sleep(1)
     return deals
+
+
+def save_pushed(pushed, path=STATE_PATH):
+    """把合并后的记录写回状态文件（全新 last_updated，保证每次运行有真实变更）。"""
+    state = {
+        "version": 1,
+        "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "pushed": pushed,
+    }
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def run_git(*args):
+    result = subprocess.run(["git", *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        log.error("git %s failed: %s", " ".join(args), result.stderr.strip())
+    return result
+
+
+def git_commit_and_push():
+    """提交状态文件并推送。pull --rebase 失败即放弃；push 失败重试 1 次。"""
+    run_git("add", STATE_PATH)
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    commit = run_git("commit", "-m", f"chore: update pushed records {date}")
+    if commit.returncode != 0:
+        log.info("nothing to commit")
+        return True
+    if run_git("pull", "--rebase").returncode != 0:
+        return False
+    if run_git("push").returncode != 0:
+        log.warning("push failed once, retrying")
+        if run_git("push").returncode != 0:
+            return False
+    return True

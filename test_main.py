@@ -210,3 +210,56 @@ class TestSendNews(unittest.TestCase):
         urlopen_mock.side_effect = [bad, bad]
         deals = [make_deal(1, "x", 100, 200, 50)]
         self.assertIsNone(main.send_news("https://hook", deals))
+
+
+class TestSavePushed(unittest.TestCase):
+    def test_writes_state_envelope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "data", "pushed_games.json")
+            pushed = {"570": {"price": 2999, "discount": 80, "when": "2026-11-04"}}
+            main.save_pushed(pushed, path)
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+            self.assertEqual(state["version"], 1)
+            self.assertEqual(state["pushed"], pushed)
+            self.assertIsNotNone(state["last_updated"])
+
+
+class TestGitCommitAndPush(unittest.TestCase):
+    @mock.patch("main.run_git")
+    def test_success_path(self, run_git_mock):
+        ok = mock.Mock(returncode=0)
+        run_git_mock.return_value = ok
+        self.assertTrue(main.git_commit_and_push())
+        cmds = [c.args for c in run_git_mock.call_args_list]
+        self.assertEqual(cmds[0], ("add", main.STATE_PATH))
+        self.assertEqual(cmds[1][:2], ("commit", "-m"))
+        self.assertEqual(cmds[2], ("pull", "--rebase"))
+        self.assertEqual(cmds[3], ("push",))
+
+    @mock.patch("main.run_git")
+    def test_rebase_failure_aborts(self, run_git_mock):
+        ok = mock.Mock(returncode=0)
+        bad = mock.Mock(returncode=1)
+        run_git_mock.side_effect = [ok, ok, bad]  # add, commit, pull 失败
+        self.assertFalse(main.git_commit_and_push())
+        called = [c.args[0] for c in run_git_mock.call_args_list]
+        self.assertNotIn("push", called)
+
+    @mock.patch("main.run_git")
+    def test_push_retried_once(self, run_git_mock):
+        ok = mock.Mock(returncode=0)
+        bad = mock.Mock(returncode=1)
+        run_git_mock.side_effect = [ok, ok, ok, bad, ok]  # add, commit, pull, push×2
+        self.assertTrue(main.git_commit_and_push())
+        pushes = [c for c in run_git_mock.call_args_list if c.args[0] == "push"]
+        self.assertEqual(len(pushes), 2)
+
+    @mock.patch("main.run_git")
+    def test_nothing_to_commit_still_ok(self, run_git_mock):
+        ok = mock.Mock(returncode=0)
+        nothing = mock.Mock(returncode=1)
+        run_git_mock.side_effect = [ok, nothing]  # add 成功, commit 无变更
+        self.assertTrue(main.git_commit_and_push())
+        called = [c.args[0] for c in run_git_mock.call_args_list]
+        self.assertNotIn("push", called)
