@@ -202,3 +202,43 @@ def git_commit_and_push():
         if run_git("push").returncode != 0:
             return False
     return True
+
+
+def main():
+    webhook = os.environ.get("WECOM_WEBHOOK")
+    if not webhook:
+        log.error("WECOM_WEBHOOK not set; configure it as a GitHub Secret")
+        return 1
+
+    try:
+        current = fetch_featured_deals()
+    except Exception as e:  # 重试耗尽后的最后异常，任何类型都按拉取失败处理
+        log.error("failed to fetch steam deals: %s", e)
+        return 1
+
+    pushed = load_pushed()
+    worth = select_new_deals(current, pushed)
+    log.info("%d deals fetched, %d worth pushing", len(current), len(worth))
+
+    if worth:
+        pushed_deals = send_news(webhook, worth)
+        if pushed_deals is None:
+            return 1  # 事务失败：状态不变，下轮 cron 重推
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for d in pushed_deals:
+            pushed[d["id"]] = {
+                "price": d["final_price"],
+                "discount": d["discount_percent"],
+                "when": today,
+            }
+    else:
+        log.info("nothing worth pushing today")
+
+    save_pushed(pushed)  # 无推送也写入（last_updated 变化）以保活
+    if not git_commit_and_push():
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

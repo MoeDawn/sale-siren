@@ -263,3 +263,52 @@ class TestGitCommitAndPush(unittest.TestCase):
         self.assertTrue(main.git_commit_and_push())
         called = [c.args[0] for c in run_git_mock.call_args_list]
         self.assertNotIn("push", called)
+
+
+class TestMainFlow(unittest.TestCase):
+    @mock.patch("main.git_commit_and_push", return_value=True)
+    @mock.patch("main.save_pushed")
+    @mock.patch("main.send_news", return_value=None)
+    @mock.patch("main.load_pushed", return_value={})
+    @mock.patch("main.fetch_featured_deals")
+    @mock.patch.dict(os.environ, {"WECOM_WEBHOOK": "https://hook"})
+    def test_push_failure_keeps_state(self, fetch_m, load_m, send_m, save_m, git_m):
+        fetch_m.return_value = [make_deal(1, "x", 100, 200, 50)]
+        self.assertEqual(main.main(), 1)
+        save_m.assert_not_called()
+        git_m.assert_not_called()
+
+    @mock.patch("main.git_commit_and_push", return_value=True)
+    @mock.patch("main.save_pushed")
+    @mock.patch("main.send_news", return_value=[make_deal(570, "Dota 2", 2999, 14999, 80)])
+    @mock.patch("main.load_pushed", return_value={})
+    @mock.patch("main.fetch_featured_deals")
+    @mock.patch.dict(os.environ, {"WECOM_WEBHOOK": "https://hook"})
+    def test_push_success_updates_state(self, fetch_m, load_m, send_m, save_m, git_m):
+        fetch_m.return_value = [make_deal(570, "Dota 2", 2999, 14999, 80)]
+        self.assertEqual(main.main(), 0)
+        saved = save_m.call_args.args[0]
+        self.assertEqual(saved["570"]["price"], 2999)
+        self.assertEqual(saved["570"]["discount"], 80)
+        git_m.assert_called_once()
+
+    @mock.patch("main.git_commit_and_push", return_value=True)
+    @mock.patch("main.save_pushed")
+    @mock.patch("main.send_news", return_value=[])
+    @mock.patch("main.load_pushed")
+    @mock.patch("main.fetch_featured_deals")
+    @mock.patch.dict(os.environ, {"WECOM_WEBHOOK": "https://hook"})
+    def test_nothing_worth_still_saves_for_keepalive(self, fetch_m, load_m, send_m, save_m, git_m):
+        fetch_m.return_value = [make_deal(570, "Dota 2", 2999, 14999, 80)]
+        load_m.return_value = {"570": {"price": 1999, "discount": 87, "when": "2026-11-03"}}
+        self.assertEqual(main.main(), 0)
+        send_m.assert_not_called()      # 价格回升 → 不打扰
+        save_m.assert_called_once()     # 但保活照常
+        git_m.assert_called_once()
+
+    @mock.patch("main.fetch_featured_deals")
+    def test_missing_webhook_exits_1(self, fetch_m):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("WECOM_WEBHOOK", None)
+            self.assertEqual(main.main(), 1)
+        fetch_m.assert_not_called()
