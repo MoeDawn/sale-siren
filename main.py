@@ -57,3 +57,53 @@ def select_new_deals(current, pushed):
             worth.append(deal)
     worth.sort(key=lambda d: (-d["discount_percent"], d["final_price"]))
     return worth
+
+
+def fetch_json(url):
+    """GET 并解析 JSON；失败按 RETRY_DELAYS 重试，耗尽后抛出最后一个异常。"""
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    last = None
+    for attempt, delay in enumerate((0,) + RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except (OSError, ValueError) as e:
+            last = e
+            log.warning("fetch %s failed (attempt %d): %s", url, attempt + 1, e)
+    raise last
+
+
+def extract_deals(payload):
+    """提取所有分类下 discount_percent > 0 的条目，同一游戏保留折扣最大的。"""
+    deals = {}
+    for category in payload.values():
+        if not isinstance(category, dict):
+            continue  # genres/layout 等列表型键
+        for item in category.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                if item.get("discount_percent", 0) <= 0:
+                    continue
+                appid = str(item["id"])
+                known = deals.get(appid)
+                if known is not None and known["discount_percent"] >= item["discount_percent"]:
+                    continue
+                deals[appid] = {
+                    "id": appid,
+                    "name": item["name"],
+                    "final_price": int(item["final_price"]),
+                    "original_price": int(item["original_price"]),
+                    "discount_percent": int(item["discount_percent"]),
+                    "header_image": item.get("header_image", ""),
+                    "discount_expiration": item.get("discount_expiration"),
+                }
+            except (KeyError, TypeError, ValueError) as e:
+                log.warning("skip malformed item: %s", e)
+    return list(deals.values())
+
+
+def fetch_featured_deals():
+    return extract_deals(fetch_json(STEAM_API_URL))

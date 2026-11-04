@@ -78,3 +78,75 @@ class TestLoadPushed(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 f.write("null")
             self.assertEqual(main.load_pushed(path), {})
+
+
+def mock_urlopen(payload):
+    """构造可 with 的假 urlopen 返回值（内部为 BytesIO）。"""
+    body = io.BytesIO(json.dumps(payload).encode("utf-8"))
+    cm = mock.MagicMock()
+    cm.__enter__.return_value = body
+    cm.__exit__.return_value = False
+    return cm
+
+
+FAKE_PAYLOAD = {
+    "specials": {
+        "id": "specials",
+        "name": "Specials",
+        "items": [
+            {"id": 570, "name": "Dota 2", "discount_percent": 80,
+             "original_price": 14999, "final_price": 2999,
+             "header_image": "http://img/570.jpg", "type": 1},
+            {"id": 730, "name": "CS2 no discount", "discount_percent": 0,
+             "original_price": 0, "final_price": 0,
+             "header_image": "http://img/730.jpg", "type": 1},
+            {"id": 999, "name": "broken item", "discount_percent": 50},  # 缺 final_price → 跳过
+        ],
+    },
+    "genres": ["Action", "RPG"],  # 列表型分类 → 跳过
+    "top_sellers": {
+        "items": [
+            {"id": 814380, "name": "Sekiro", "discount_percent": 75,
+             "original_price": 26800, "final_price": 6700,
+             "header_image": "http://img/814380.jpg", "type": 1},
+            {"id": 570, "name": "Dota 2 dup weaker", "discount_percent": 50,
+             "original_price": 14999, "final_price": 7499,
+             "header_image": "http://img/570.jpg", "type": 1},
+        ],
+    },
+}
+
+
+class TestExtractDeals(unittest.TestCase):
+    def test_extracts_discounted_items_only(self):
+        deals = main.extract_deals(FAKE_PAYLOAD)
+        self.assertEqual(len(deals), 2)
+        by_id = {d["id"]: d for d in deals}
+        self.assertEqual(by_id["570"]["discount_percent"], 80)      # 保留折扣最大
+        self.assertEqual(by_id["570"]["final_price"], 2999)
+        self.assertEqual(by_id["814380"]["final_price"], 6700)
+        self.assertNotIn("730", by_id)   # 无折扣
+        self.assertNotIn("999", by_id)   # 坏条目
+
+
+class TestFetchJson(unittest.TestCase):
+    @mock.patch("main.time.sleep")
+    @mock.patch("main.urllib.request.urlopen")
+    def test_retry_then_success(self, urlopen_mock, sleep_mock):
+        urlopen_mock.side_effect = [OSError("boom"), OSError("boom"), mock_urlopen({"ok": 1})]
+        self.assertEqual(main.fetch_json("http://x"), {"ok": 1})
+
+    @mock.patch("main.time.sleep")
+    @mock.patch("main.urllib.request.urlopen", side_effect=OSError("down"))
+    def test_all_retries_fail_raises(self, urlopen_mock, sleep_mock):
+        with self.assertRaises(OSError):
+            main.fetch_json("http://x")
+
+
+class TestFetchFeaturedDeals(unittest.TestCase):
+    @mock.patch("main.extract_deals", return_value=[make_deal(1, "x", 100, 200, 50)])
+    @mock.patch("main.fetch_json", return_value={"specials": {}})
+    def test_wiring(self, fetch_json_mock, extract_mock):
+        deals = main.fetch_featured_deals()
+        fetch_json_mock.assert_called_once_with(main.STEAM_API_URL)
+        self.assertEqual(deals, [make_deal(1, "x", 100, 200, 50)])
