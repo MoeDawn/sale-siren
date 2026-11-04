@@ -150,3 +150,63 @@ class TestFetchFeaturedDeals(unittest.TestCase):
         deals = main.fetch_featured_deals()
         fetch_json_mock.assert_called_once_with(main.STEAM_API_URL)
         self.assertEqual(deals, [make_deal(1, "x", 100, 200, 50)])
+
+
+class TestYuan(unittest.TestCase):
+    def test_formats_fen(self):
+        self.assertEqual(main.yuan(2999), "29.99")
+        self.assertEqual(main.yuan(0), "0.00")
+        self.assertEqual(main.yuan(26800), "268.00")
+
+
+class TestBuildArticles(unittest.TestCase):
+    def test_fields_and_format(self):
+        deals = [make_deal(814380, "只狼", 6700, 26800, 75)]
+        arts = main.build_articles(deals)
+        self.assertEqual(arts[0]["title"], "🎮 只狼 -75%")
+        self.assertEqual(arts[0]["description"], "原价 ¥268.00 → 现价 ¥67.00")
+        self.assertEqual(arts[0]["url"], "https://store.steampowered.com/app/814380/?cc=cn")
+        self.assertEqual(arts[0]["picurl"], "http://img/x.jpg")
+
+
+class TestPostWecom(unittest.TestCase):
+    @mock.patch("main.urllib.request.urlopen")
+    def test_errcode_zero_true(self, urlopen_mock):
+        urlopen_mock.return_value = mock_urlopen({"errcode": 0, "errmsg": "ok"})
+        payload = {"msgtype": "news", "news": {"articles": [{"title": "t"}]}}
+        self.assertTrue(main.post_wecom("https://hook", payload))
+
+    @mock.patch("main.urllib.request.urlopen")
+    def test_errcode_nonzero_false(self, urlopen_mock):
+        urlopen_mock.return_value = mock_urlopen({"errcode": 93000, "errmsg": "invalid webhook"})
+        payload = {"msgtype": "news", "news": {"articles": [{"title": "t"}]}}
+        self.assertFalse(main.post_wecom("https://hook", payload))
+
+    @mock.patch("main.urllib.request.urlopen", side_effect=OSError("refused"))
+    def test_request_error_false(self, urlopen_mock):
+        payload = {"msgtype": "news", "news": {"articles": [{"title": "t"}]}}
+        self.assertFalse(main.post_wecom("https://hook", payload))
+
+
+class TestSendNews(unittest.TestCase):
+    @mock.patch("main.time.sleep")
+    @mock.patch("main.urllib.request.urlopen")
+    def test_batches_of_eight_all_success(self, urlopen_mock, sleep_mock):
+        urlopen_mock.side_effect = [mock_urlopen({"errcode": 0}) for _ in range(2)]
+        deals = [make_deal(1000 + i, f"game{i}", 1000, 2000, 50) for i in range(10)]
+        pushed = main.send_news("https://hook", deals)
+        self.assertEqual(len(pushed), 10)
+        calls = urlopen_mock.call_args_list
+        self.assertEqual(len(calls), 2)
+        first = json.loads(calls[0].args[0].data)
+        second = json.loads(calls[1].args[0].data)
+        self.assertEqual(len(first["news"]["articles"]), 8)
+        self.assertEqual(len(second["news"]["articles"]), 2)
+
+    @mock.patch("main.time.sleep")
+    @mock.patch("main.urllib.request.urlopen")
+    def test_retry_once_then_fail_returns_none(self, urlopen_mock, sleep_mock):
+        bad = mock_urlopen({"errcode": 93000, "errmsg": "invalid webhook"})
+        urlopen_mock.side_effect = [bad, bad]
+        deals = [make_deal(1, "x", 100, 200, 50)]
+        self.assertIsNone(main.send_news("https://hook", deals))

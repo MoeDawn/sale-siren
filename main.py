@@ -107,3 +107,61 @@ def extract_deals(payload):
 
 def fetch_featured_deals():
     return extract_deals(fetch_json(STEAM_API_URL))
+
+
+def yuan(price_fen):
+    """分 → 人民币字符串，如 2999 → "29.99"。"""
+    return f"{price_fen // 100}.{price_fen % 100:02d}"
+
+
+def build_articles(deals):
+    """每个游戏组装一篇企业微信 news 图文，保持传入顺序。"""
+    return [
+        {
+            "title": f"🎮 {d['name']} -{d['discount_percent']}%",
+            "description": f"原价 ¥{yuan(d['original_price'])} → 现价 ¥{yuan(d['final_price'])}",
+            "url": STORE_URL_TEMPLATE.format(appid=d["id"]),
+            "picurl": d["header_image"],
+        }
+        for d in deals
+    ]
+
+
+def post_wecom(webhook, payload):
+    """POST 一条消息；HTTP 200 且 errcode == 0 才算成功。"""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        webhook, data=body,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.load(resp)
+    except (OSError, ValueError) as e:
+        log.warning("wecom request failed: %s", e)
+        return False
+    if result.get("errcode") != 0:
+        log.warning("wecom returned errcode=%s errmsg=%s",
+                    result.get("errcode"), result.get("errmsg"))
+        return False
+    return True
+
+
+def send_news(webhook, deals):
+    """按 8 篇/条分批发送 news 消息，每批失败重试 1 次。
+
+    全部成功返回传入的 deals；任一批最终失败返回 None（事务失败信号）。
+    """
+    articles = build_articles(deals)
+    batches = [articles[i:i + NEWS_BATCH_SIZE]
+               for i in range(0, len(articles), NEWS_BATCH_SIZE)]
+    for idx, batch in enumerate(batches, 1):
+        payload = {"msgtype": "news", "news": {"articles": batch}}
+        if not post_wecom(webhook, payload):
+            log.warning("news batch %d/%d failed once, retrying", idx, len(batches))
+            if not post_wecom(webhook, payload):
+                log.error("news batch %d/%d failed after retry", idx, len(batches))
+                return None
+        if idx < len(batches):
+            time.sleep(1)
+    return deals
