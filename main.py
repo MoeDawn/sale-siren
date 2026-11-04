@@ -188,14 +188,19 @@ def run_git(*args):
 
 
 def git_commit_and_push():
-    """提交状态文件并推送。pull --rebase 失败即放弃；push 失败重试 1 次。"""
+    """提交状态文件并推送。用 status --porcelain 正向判断有无变更；pull --rebase 失败时中止 rebase；push 失败重试 1 次。"""
     run_git("add", STATE_PATH)
+    status = run_git("status", "--porcelain", "--", STATE_PATH)
+    if not status.stdout.strip():
+        log.info("nothing to commit")
+        return True
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     commit = run_git("commit", "-m", f"chore: update pushed records {date}")
     if commit.returncode != 0:
-        log.info("nothing to commit")
-        return True
+        return False
     if run_git("pull", "--rebase").returncode != 0:
+        log.warning("pull --rebase failed, aborting the rebase")
+        run_git("rebase", "--abort")
         return False
     if run_git("push").returncode != 0:
         log.warning("push failed once, retrying")
