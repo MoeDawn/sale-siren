@@ -1,4 +1,4 @@
-# Steam 每日折扣推送
+# sale-siren
 
 每天自动获取 Steam 特惠，把值得推送的游戏（首次出现、价格创新低、或与上次
 持平）以图文卡片推送到 `WECOM_WEBHOOK` Secret 里配置的 webhook 地址。
