@@ -8,6 +8,7 @@ GitHub Actions 每天运行一次：拉取 Steam 首页精选特惠，与历史�
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ RETRY_DELAYS = (5, 15)
 NEWS_BATCH_SIZE = 8
 STORE_URL_TEMPLATE = "https://store.steampowered.com/app/{appid}/?cc=cn"
 UA = "Mozilla/5.0 (X11; Linux x86_64) steam-wecom-push/1.0"
+TITLE_MAX_BYTES = 128  # 企微 news title 上限 128 字节（UTF-8）
 
 
 def load_pushed(path=STATE_PATH):
@@ -114,17 +116,40 @@ def yuan(price_fen):
     return f"{price_fen // 100}.{price_fen % 100:02d}"
 
 
+def _truncate_title(name, price_part, max_bytes=TITLE_MAX_BYTES):
+    """游戏名 + 价格段拼标题，超 128 字节时优先保住价格段截游戏名。"""
+    price_data = price_part.encode("utf-8")
+    name_data = name.encode("utf-8")
+    budget = max_bytes - len(price_data)  # 价格段始终完整保留
+    if budget <= 0:
+        price = price_data[:max_bytes].decode("utf-8", errors="ignore")
+        return price
+    if len(name_data) > budget:
+        name_data = name_data[:budget]
+        # 回退到完整 UTF-8 字符边界（避免切一半字符）
+        while name_data and name_data[-1] & 0xC0 == 0x80:
+            name_data = name_data[:-1]
+    name = name_data.decode("utf-8", errors="ignore")
+    return name + price_part
+
+
 def build_articles(deals):
-    """每个游戏组装一篇企业微信 news 图文，保持传入顺序。"""
-    return [
-        {
-            "title": f"🎮 {d['name']} -{d['discount_percent']}%",
+    """每个游戏组装一篇 news 图文，保持传入顺序。
+
+    企微 news 卡片的 description 字段在群聊里不渲染，因此价格并入
+    标题一并送达；标题超 128 字节时截断保护。
+    """
+    articles = []
+    for d in deals:
+        price_part = f" -{d['discount_percent']}% ¥{yuan(d['original_price'])}→¥{yuan(d['final_price'])}"
+        title = _truncate_title(f"🎮 {d['name']}", price_part)
+        articles.append({
+            "title": title,
             "description": f"原价 ¥{yuan(d['original_price'])} → 现价 ¥{yuan(d['final_price'])}",
             "url": STORE_URL_TEMPLATE.format(appid=d["id"]),
             "picurl": d["header_image"],
-        }
-        for d in deals
-    ]
+        })
+    return articles
 
 
 def post_wecom(webhook, payload):
@@ -165,6 +190,25 @@ def send_news(webhook, deals):
         if idx < len(batches):
             time.sleep(1)
     return deals
+
+
+def send_news_all(webhooks, deals):
+    """把 deals 发送到所有 webhook；任一 webhook 失败返回 None。
+
+    注意：前面的 webhook 可能已收到消息而后面失败 —— 此时整体按事务
+    失败处理（不写状态），下轮重推会让成功的群收到重复消息，符合
+    "宁可重复推，绝不漏推"。
+    """
+    for webhook in webhooks:
+        if send_news(webhook, deals) is None:
+            log.error("webhook %s failed; aborting remaining webhooks", webhook)
+            return None
+    return deals
+
+
+def parse_webhooks(raw):
+    """解析 WECOM_WEBHOOK：逗号/分号/空白分隔的多个 webhook 地址。"""
+    return [w for w in (x.strip() for x in re.split(r"[,;\s]+", raw)) if w]
 
 
 def save_pushed(pushed, path=STATE_PATH):
@@ -210,9 +254,11 @@ def git_commit_and_push():
 
 
 def main():
-    webhook = os.environ.get("WECOM_WEBHOOK")
-    if not webhook:
-        log.error("WECOM_WEBHOOK not set; configure it as a GitHub Secret")
+    raw = os.environ.get("WECOM_WEBHOOK")
+    webhooks = parse_webhooks(raw) if raw else []
+    if not webhooks:
+        log.error("WECOM_WEBHOOK not set; configure it as a GitHub Secret "
+                  "(multiple webhooks separated by comma/newline are supported)")
         return 1
 
     try:
@@ -226,7 +272,7 @@ def main():
     log.info("%d deals fetched, %d worth pushing", len(current), len(worth))
 
     if worth:
-        pushed_deals = send_news(webhook, worth)
+        pushed_deals = send_news_all(webhooks, worth)
         if pushed_deals is None:
             return 1  # 事务失败：状态不变，下轮 cron 重推
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

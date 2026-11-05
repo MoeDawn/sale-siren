@@ -163,10 +163,17 @@ class TestBuildArticles(unittest.TestCase):
     def test_fields_and_format(self):
         deals = [make_deal(814380, "只狼", 6700, 26800, 75)]
         arts = main.build_articles(deals)
-        self.assertEqual(arts[0]["title"], "🎮 只狼 -75%")
+        self.assertEqual(arts[0]["title"], "🎮 只狼 -75% ¥268.00→¥67.00")
         self.assertEqual(arts[0]["description"], "原价 ¥268.00 → 现价 ¥67.00")
         self.assertEqual(arts[0]["url"], "https://store.steampowered.com/app/814380/?cc=cn")
         self.assertEqual(arts[0]["picurl"], "http://img/x.jpg")
+
+    def test_long_name_truncated_to_128_bytes(self):
+        long_name = "超长游戏名称测试" * 30  # 远超 128 字节
+        deals = [make_deal(1, long_name, 1000, 2000, 50)]
+        arts = main.build_articles(deals)
+        self.assertLessEqual(len(arts[0]["title"].encode("utf-8")), 128)
+        self.assertTrue(arts[0]["title"].endswith("→¥10.00"))  # 价格段不被截掉
 
 
 class TestPostWecom(unittest.TestCase):
@@ -318,3 +325,33 @@ class TestMainFlow(unittest.TestCase):
             os.environ.pop("WECOM_WEBHOOK", None)
             self.assertEqual(main.main(), 1)
         fetch_m.assert_not_called()
+
+
+class TestSendNewsAll(unittest.TestCase):
+    @mock.patch("main.send_news")
+    def test_all_success(self, send_mock):
+        send_mock.return_value = ["deal"]
+        self.assertEqual(main.send_news_all(["https://a", "https://b"], ["deal"]), ["deal"])
+        self.assertEqual(send_mock.call_count, 2)
+
+    @mock.patch("main.send_news")
+    def test_second_webhook_fails_returns_none(self, send_mock):
+        send_mock.side_effect = [["deal"], None]
+        self.assertIsNone(main.send_news_all(["https://a", "https://b"], ["deal"]))
+
+
+class TestParseWebhooks(unittest.TestCase):
+    def test_single(self):
+        self.assertEqual(main.parse_webhooks("https://a"), ["https://a"])
+
+    def test_comma_separated(self):
+        self.assertEqual(main.parse_webhooks("https://a,https://b"), ["https://a", "https://b"])
+
+    def test_mixed_separators_and_spaces(self):
+        self.assertEqual(
+            main.parse_webhooks("https://a; https://b\nhttps://c ,"),
+            ["https://a", "https://b", "https://c"],
+        )
+
+    def test_empty(self):
+        self.assertEqual(main.parse_webhooks("  ,; "), [])
